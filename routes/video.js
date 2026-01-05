@@ -18,7 +18,7 @@ const { getJWTToken } = require('../utils/authHub');
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const AUTH_HUB_URL = process.env.AUTH_HUB_URL || 'https://auth-hub.automotiveservicetech.com';
-const TM_API_BASE = process.env.TM_API_BASE || 'https://api.tekmetric.com';
+const TM_API_BASE = process.env.TM_API_BASE || 'https://shop.tekmetric.com';
 
 // ============================================================================
 // Helper Functions
@@ -286,6 +286,7 @@ function uploadToS3Form(s3Url, s3Fields, s3Key, filePath, contentType) {
 
 /**
  * Make HTTP/HTTPS request (proxy to TekMetric API)
+ * Uses x-auth-token header as required by TM API
  */
 function proxyToTM(endpoint, method, body, jwtToken) {
   return new Promise((resolve, reject) => {
@@ -300,7 +301,8 @@ function proxyToTM(endpoint, method, body, jwtToken) {
       method: method,
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${jwtToken}`
+        'x-auth-token': jwtToken,
+        'accept': 'application/json'
       }
     };
 
