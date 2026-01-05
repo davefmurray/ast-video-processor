@@ -325,6 +325,71 @@ function proxyToTM(endpoint, method, body, jwtToken) {
 // ============================================================================
 
 /**
+ * GET /debug-inspections
+ *
+ * Debug endpoint that returns raw TekMetric API response for inspections.
+ * Use this to understand the exact structure TekMetric is returning.
+ */
+router.get('/debug-inspections', async (req, res) => {
+  const { shopId, roNumber } = req.query;
+
+  if (!shopId || !roNumber) {
+    return res.status(400).json({ error: 'Missing required params: shopId, roNumber' });
+  }
+
+  try {
+    const jwtToken = await getJWTToken(shopId);
+    if (!jwtToken) {
+      return res.status(401).json({ error: 'NO_TOKEN' });
+    }
+
+    // Search for RO
+    const searchResult = await proxyToTM(
+      `/api/shop/${shopId}/repair-orders?search=${encodeURIComponent(roNumber)}&size=10`,
+      'GET',
+      null,
+      jwtToken
+    );
+
+    const searchData = JSON.parse(searchResult.body);
+    const ros = searchData.content || [];
+    const ro = ros.find((r) => String(r.repairOrderNumber) === String(roNumber));
+
+    if (!ro) {
+      return res.status(404).json({ error: 'RO_NOT_FOUND', searchData });
+    }
+
+    // Get inspections - return RAW response
+    const inspResult = await proxyToTM(
+      `/api/shop/${shopId}/repair-orders/${ro.id}/inspections`,
+      'GET',
+      null,
+      jwtToken
+    );
+
+    const inspectionsRaw = JSON.parse(inspResult.body);
+
+    // Return debug info
+    return res.json({
+      roId: ro.id,
+      roNumber: ro.repairOrderNumber,
+      ro_customer: ro.customer,
+      ro_vehicle: ro.vehicle,
+      inspections_type: Array.isArray(inspectionsRaw) ? 'array' : typeof inspectionsRaw,
+      inspections_count: Array.isArray(inspectionsRaw) ? inspectionsRaw.length : 1,
+      inspections_raw: inspectionsRaw,
+      // For each inspection, show what keys are available
+      inspection_keys: Array.isArray(inspectionsRaw) 
+        ? inspectionsRaw.map(i => ({ id: i.id, keys: Object.keys(i), tasks_count: i.tasks?.length, inspectionTasks_count: i.inspectionTasks?.length }))
+        : [{ id: inspectionsRaw.id, keys: Object.keys(inspectionsRaw), tasks_count: inspectionsRaw.tasks?.length, inspectionTasks_count: inspectionsRaw.inspectionTasks?.length }]
+    });
+
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * GET /get-inspections
  *
  * Fetches RO and inspection data from Tekmetric API.
