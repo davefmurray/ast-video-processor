@@ -323,6 +323,131 @@ function proxyToTM(endpoint, method, body, jwtToken) {
 // ============================================================================
 
 /**
+ * GET /get-inspections
+ *
+ * Fetches RO and inspection data from Tekmetric API.
+ * Routes through video-processor because Railway IP can reach TM API
+ * (Supabase Edge Functions IP is blocked by Tekmetric).
+ *
+ * Query params:
+ * - shopId: TekMetric shop ID (required)
+ * - roNumber: Repair order number to search for (required)
+ *
+ * Returns:
+ * - roId, roNumber, customer, vehicle, tasks[]
+ */
+router.get('/get-inspections', async (req, res) => {
+  const { shopId, roNumber } = req.query;
+
+  console.log(`[inspections] Looking up RO ${roNumber} for shop ${shopId}`);
+
+  if (!shopId || !roNumber) {
+    return res.status(400).json({ error: 'Missing required params: shopId, roNumber' });
+  }
+
+  try {
+    // Get JWT token from AUTH-HUB
+    const jwtToken = await getJWTToken(shopId);
+    if (!jwtToken) {
+      return res.status(401).json({ error: 'NO_TOKEN', details: 'No JWT token available for this shop' });
+    }
+
+    // Search for RO by number
+    console.log(`[inspections] Searching TM API for RO ${roNumber}...`);
+    const searchResult = await proxyToTM(
+      `/api/shop/${shopId}/repair-orders?search=${encodeURIComponent(roNumber)}&size=10`,
+      'GET',
+      null,
+      jwtToken
+    );
+
+    if (searchResult.status !== 200) {
+      console.error(`[inspections] TM search failed: ${searchResult.status} - ${searchResult.body}`);
+      return res.status(searchResult.status).json({
+        error: 'RO_SEARCH_FAILED',
+        details: `TM API returned ${searchResult.status}`,
+        body: searchResult.body
+      });
+    }
+
+    const searchData = JSON.parse(searchResult.body);
+    const ros = searchData.content || [];
+
+    // Find exact RO number match
+    const ro = ros.find((r) => String(r.repairOrderNumber) === String(roNumber));
+    if (!ro) {
+      return res.status(404).json({ error: 'RO_NOT_FOUND', details: `RO ${roNumber} not found` });
+    }
+
+    console.log(`[inspections] Found RO ${ro.id}, fetching inspections...`);
+
+    // Get inspections for this RO
+    const inspResult = await proxyToTM(
+      `/api/shop/${shopId}/repair-orders/${ro.id}/inspections`,
+      'GET',
+      null,
+      jwtToken
+    );
+
+    if (inspResult.status !== 200) {
+      console.error(`[inspections] TM inspections failed: ${inspResult.status} - ${inspResult.body}`);
+      return res.status(inspResult.status).json({
+        error: 'INSPECTIONS_FETCH_FAILED',
+        details: `TM API returned ${inspResult.status}`,
+        body: inspResult.body
+      });
+    }
+
+    const inspections = JSON.parse(inspResult.body);
+
+    // Extract tasks from all inspections
+    const tasks = [];
+    for (const insp of inspections) {
+      if (insp.tasks && Array.isArray(insp.tasks)) {
+        for (const task of insp.tasks) {
+          tasks.push({
+            id: task.id,
+            name: task.name,
+            inspectionId: insp.id,
+            rating: task.inspectionRating?.code || null,
+            finding: task.finding || '',
+            group: task.inspectionGroup || '',
+            groupSortOrder: task.groupSortOrder || 0,
+            inspectionTaskId: task.inspectionTaskId,
+            externalImages: task.externalImages || []
+          });
+        }
+      }
+    }
+
+    // Build customer and vehicle info
+    const customer = ro.customer
+      ? `${ro.customer.firstName || ''} ${ro.customer.lastName || ''}`.trim()
+      : 'Unknown';
+    const vehicle = ro.vehicle
+      ? `${ro.vehicle.year || ''} ${ro.vehicle.make || ''} ${ro.vehicle.model || ''}`.trim()
+      : 'Unknown';
+
+    console.log(`[inspections] Returning ${tasks.length} tasks for RO ${roNumber}`);
+
+    return res.json({
+      roId: ro.id,
+      roNumber: ro.repairOrderNumber,
+      customer,
+      vehicle,
+      tasks
+    });
+
+  } catch (error) {
+    console.error(`[inspections] Error:`, error.message);
+    return res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      details: error.message
+    });
+  }
+});
+
+/**
  * POST /merge-and-upload
  *
  * Accepts multipart form with:
