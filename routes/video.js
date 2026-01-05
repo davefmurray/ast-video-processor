@@ -400,20 +400,48 @@ router.get('/get-inspections', async (req, res) => {
       });
     }
 
-    const inspections = JSON.parse(inspResult.body);
+    const inspectionsRaw = JSON.parse(inspResult.body);
+
+    // Handle both array and single object responses from TekMetric
+    const inspections = Array.isArray(inspectionsRaw) ? inspectionsRaw : [inspectionsRaw];
 
     // Extract tasks from all inspections
+    // TekMetric returns tasks in two different structures:
+    // 1. inspection.tasks - flat array of tasks
+    // 2. inspection.inspectionTasks - nested sections containing tasks
     const tasks = [];
+
     for (const insp of inspections) {
-      if (insp.tasks && Array.isArray(insp.tasks)) {
-        for (const task of insp.tasks) {
+      // Handle flat tasks array (Structure 1)
+      const directTasks = insp.tasks || [];
+      for (const task of directTasks) {
+        tasks.push({
+          id: task.id,
+          name: task.name,
+          inspectionId: insp.id,
+          inspectionName: insp.name || '',
+          rating: task.inspectionRating?.code || null,
+          finding: task.finding || '',
+          group: task.inspectionGroup || '',
+          groupSortOrder: task.groupSortOrder || 0,
+          inspectionTaskId: task.inspectionTaskId,
+          externalImages: task.externalImages || []
+        });
+      }
+
+      // Handle nested inspectionTasks structure (Structure 2)
+      const nestedSections = insp.inspectionTasks || [];
+      for (const section of nestedSections) {
+        const sectionTasks = section.tasks || [];
+        for (const task of sectionTasks) {
           tasks.push({
             id: task.id,
             name: task.name,
             inspectionId: insp.id,
+            inspectionName: insp.name || '',
             rating: task.inspectionRating?.code || null,
             finding: task.finding || '',
-            group: task.inspectionGroup || '',
+            group: task.inspectionGroup || section.title || '',
             groupSortOrder: task.groupSortOrder || 0,
             inspectionTaskId: task.inspectionTaskId,
             externalImages: task.externalImages || []
@@ -423,11 +451,12 @@ router.get('/get-inspections', async (req, res) => {
     }
 
     // Build customer and vehicle info
+    // Use fullName if available (original behavior), otherwise build from parts
     const customer = ro.customer
-      ? `${ro.customer.firstName || ''} ${ro.customer.lastName || ''}`.trim()
+      ? (ro.customer.fullName || `${ro.customer.firstName || ''} ${ro.customer.lastName || ''}`.trim())
       : 'Unknown';
     const vehicle = ro.vehicle
-      ? `${ro.vehicle.year || ''} ${ro.vehicle.make || ''} ${ro.vehicle.model || ''}`.trim()
+      ? (ro.vehicle.description || ro.vehicle.shortDescription || `${ro.vehicle.year || ''} ${ro.vehicle.make || ''} ${ro.vehicle.model || ''}`.trim())
       : 'Unknown';
 
     console.log(`[inspections] Returning ${tasks.length} tasks for RO ${roNumber}`);
