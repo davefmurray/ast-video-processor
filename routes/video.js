@@ -369,15 +369,15 @@ router.get('/debug-inspections', async (req, res) => {
 
     const inspectionsRaw = JSON.parse(inspResult.body);
 
-    // Return debug info
+    // Return debug info with FULL RO object
     return res.json({
       roId: ro.id,
       roNumber: ro.repairOrderNumber,
-      ro_customer: ro.customer,
-      ro_vehicle: ro.vehicle,
+      // Show ALL fields available in the RO object
+      ro_keys: Object.keys(ro),
+      ro_full: ro,
       inspections_type: Array.isArray(inspectionsRaw) ? 'array' : typeof inspectionsRaw,
       inspections_count: Array.isArray(inspectionsRaw) ? inspectionsRaw.length : 1,
-      inspections_raw: inspectionsRaw,
       // For each inspection, show what keys are available
       inspection_keys: Array.isArray(inspectionsRaw) 
         ? inspectionsRaw.map(i => ({ id: i.id, keys: Object.keys(i), tasks_count: i.tasks?.length, inspectionTasks_count: i.inspectionTasks?.length }))
@@ -515,16 +515,31 @@ router.get('/get-inspections', async (req, res) => {
       }
     }
 
-    // Build customer and vehicle info
-    // Use fullName if available (original behavior), otherwise build from parts
-    const customer = ro.customer
-      ? (ro.customer.fullName || `${ro.customer.firstName || ''} ${ro.customer.lastName || ''}`.trim())
-      : 'Unknown';
-    const vehicle = ro.vehicle
-      ? (ro.vehicle.description || ro.vehicle.shortDescription || `${ro.vehicle.year || ''} ${ro.vehicle.make || ''} ${ro.vehicle.model || ''}`.trim())
-      : 'Unknown';
+    // Build customer and vehicle info from RO
+    // TekMetric search results include customerId/vehicleId but not full objects
+    // Try multiple field patterns
+    let customer = 'Unknown';
+    let vehicle = 'Unknown';
 
-    console.log(`[inspections] Returning ${tasks.length} tasks for RO ${roNumber}`);
+    // Customer: check various possible field names
+    if (ro.customer) {
+      customer = ro.customer.fullName || `${ro.customer.firstName || ''} ${ro.customer.lastName || ''}`.trim() || 'Unknown';
+    } else if (ro.customerName) {
+      customer = ro.customerName;
+    } else if (ro.customerFullName) {
+      customer = ro.customerFullName;
+    }
+
+    // Vehicle: check various possible field names  
+    if (ro.vehicle) {
+      vehicle = ro.vehicle.description || ro.vehicle.shortDescription || `${ro.vehicle.year || ''} ${ro.vehicle.make || ''} ${ro.vehicle.model || ''}`.trim() || 'Unknown';
+    } else if (ro.vehicleDescription) {
+      vehicle = ro.vehicleDescription;
+    } else if (ro.vehicleName) {
+      vehicle = ro.vehicleName;
+    }
+
+    console.log(`[inspections] Returning ${tasks.length} tasks for RO ${roNumber} (customer: ${customer}, vehicle: ${vehicle})`);
 
     return res.json({
       roId: ro.id,
