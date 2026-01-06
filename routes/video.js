@@ -794,6 +794,67 @@ router.post('/merge-only', async (req, res) => {
 });
 
 /**
+ * POST /complete-inspection
+ *
+ * Marks an inspection as complete in Tekmetric.
+ *
+ * Body params:
+ * - shopId: TekMetric shop ID (required)
+ * - roId: Repair order ID (required)
+ * - inspectionId: Inspection ID (required)
+ *
+ * Returns success/error status.
+ */
+router.post('/complete-inspection', async (req, res) => {
+  const { shopId, roId, inspectionId } = req.body;
+
+  console.log(`[inspection] Completing inspection ${inspectionId} for RO ${roId}`);
+
+  if (!shopId || !roId || !inspectionId) {
+    return res.status(400).json({ error: 'Missing required fields: shopId, roId, inspectionId' });
+  }
+
+  try {
+    // Get JWT token from AUTH-HUB
+    const jwtToken = await getJWTToken(shopId);
+    if (!jwtToken) {
+      return res.status(401).json({ error: 'NO_TOKEN', details: 'No JWT token available for this shop' });
+    }
+
+    // Update inspection status to complete
+    // According to TM API, PUT to inspection endpoint with status: 'COMPLETE'
+    const updateResult = await proxyToTM(
+      `/api/shop/${shopId}/repair-orders/${roId}/inspections/${inspectionId}`,
+      'PUT',
+      {
+        id: parseInt(inspectionId),
+        status: 'COMPLETE'
+      },
+      jwtToken
+    );
+
+    if (updateResult.status === 200 || updateResult.status === 204) {
+      console.log(`[inspection] Inspection ${inspectionId} marked as complete`);
+      return res.json({ success: true, message: 'Inspection completed' });
+    } else {
+      console.error(`[inspection] Failed to complete: ${updateResult.status} - ${updateResult.body}`);
+      return res.status(updateResult.status).json({
+        error: 'COMPLETE_FAILED',
+        details: `TM API returned ${updateResult.status}`,
+        body: updateResult.body
+      });
+    }
+
+  } catch (error) {
+    console.error(`[inspection] Error completing inspection:`, error.message);
+    return res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      details: error.message
+    });
+  }
+});
+
+/**
  * GET /health
  * Health check for video processing route
  */
