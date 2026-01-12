@@ -440,10 +440,22 @@ router.get('/get-inspections', async (req, res) => {
     const searchData = JSON.parse(searchResult.body);
     const ros = searchData.content || [];
 
+    // Log search results for debugging
+    console.log(`[inspections] TM search returned ${ros.length} results (total: ${searchData.totalElements || 'unknown'})`);
+    if (ros.length > 0) {
+      console.log(`[inspections] RO numbers in results: ${ros.map(r => r.repairOrderNumber).join(', ')}`);
+    }
+
     // Find exact RO number match
     const ro = ros.find((r) => String(r.repairOrderNumber) === String(roNumber));
     if (!ro) {
-      return res.status(404).json({ error: 'RO_NOT_FOUND', details: `RO ${roNumber} not found` });
+      console.log(`[inspections] RO ${roNumber} NOT in search results. Search returned: ${JSON.stringify(ros.map(r => ({ num: r.repairOrderNumber, status: r.status || r.repairOrderStatus })))}`);
+      return res.status(404).json({
+        error: 'RO_NOT_FOUND',
+        details: `RO ${roNumber} not found`,
+        searchResultCount: ros.length,
+        searchedNumbers: ros.map(r => r.repairOrderNumber)
+      });
     }
 
     console.log(`[inspections] Found RO ${ro.id}, fetching inspections...`);
