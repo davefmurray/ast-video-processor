@@ -343,10 +343,9 @@ router.get('/debug-inspections', async (req, res) => {
       return res.status(401).json({ error: 'NO_TOKEN' });
     }
 
-    // Search for RO - include all statuses to find ROs in any state
-    const allStatuses = 'ESTIMATE,ESTIMATING,IN_PROGRESS,AWAITING_APPROVAL,APPROVED,INVOICED,PAID,ARCHIVED';
+    // Search for RO
     const searchResult = await proxyToTM(
-      `/api/shop/${shopId}/repair-orders?search=${encodeURIComponent(roNumber)}&size=50&repairOrderStatuses=${allStatuses}`,
+      `/api/shop/${shopId}/repair-orders?search=${encodeURIComponent(roNumber)}&size=10`,
       'GET',
       null,
       jwtToken
@@ -370,15 +369,6 @@ router.get('/debug-inspections', async (req, res) => {
 
     const inspectionsRaw = JSON.parse(inspResult.body);
 
-    // Check if full=true query param
-    if (req.query.full === 'true') {
-      return res.json({
-        roId: ro.id,
-        roNumber: ro.repairOrderNumber,
-        inspections: inspectionsRaw
-      });
-    }
-
     // Return debug info with FULL RO object
     return res.json({
       roId: ro.id,
@@ -389,7 +379,7 @@ router.get('/debug-inspections', async (req, res) => {
       inspections_type: Array.isArray(inspectionsRaw) ? 'array' : typeof inspectionsRaw,
       inspections_count: Array.isArray(inspectionsRaw) ? inspectionsRaw.length : 1,
       // For each inspection, show what keys are available
-      inspection_keys: Array.isArray(inspectionsRaw)
+      inspection_keys: Array.isArray(inspectionsRaw) 
         ? inspectionsRaw.map(i => ({ id: i.id, keys: Object.keys(i), tasks_count: i.tasks?.length, inspectionTasks_count: i.inspectionTasks?.length }))
         : [{ id: inspectionsRaw.id, keys: Object.keys(inspectionsRaw), tasks_count: inspectionsRaw.tasks?.length, inspectionTasks_count: inspectionsRaw.inspectionTasks?.length }]
     });
@@ -429,11 +419,10 @@ router.get('/get-inspections', async (req, res) => {
       return res.status(401).json({ error: 'NO_TOKEN', details: 'No JWT token available for this shop' });
     }
 
-    // Search for RO by number - include all statuses to find ROs in any state
+    // Search for RO by number
     console.log(`[inspections] Searching TM API for RO ${roNumber}...`);
-    const allStatuses = 'ESTIMATE,ESTIMATING,IN_PROGRESS,AWAITING_APPROVAL,APPROVED,INVOICED,PAID,ARCHIVED';
     const searchResult = await proxyToTM(
-      `/api/shop/${shopId}/repair-orders?search=${encodeURIComponent(roNumber)}&size=50&repairOrderStatuses=${allStatuses}`,
+      `/api/shop/${shopId}/repair-orders?search=${encodeURIComponent(roNumber)}&size=10`,
       'GET',
       null,
       jwtToken
@@ -481,65 +470,6 @@ router.get('/get-inspections', async (req, res) => {
     // Handle both array and single object responses from TekMetric
     const inspections = Array.isArray(inspectionsRaw) ? inspectionsRaw : [inspectionsRaw];
 
-    // TekMetric S3 bucket URL for images
-    // Thumbnails are at: https://tekmetric-media.s3.amazonaws.com/thumbnails/shop/...
-    // Originals are at: https://tekmetric-media.s3.amazonaws.com/shop/...
-    const TM_MEDIA_BASE = 'https://tekmetric-media.s3.amazonaws.com/';
-
-    // Build a lookup of task images from inspection-level images array
-    // Image paths contain: tasks/{taskId}/{filename}
-    const taskImagesMap = {};
-    const allImagePaths = []; // Collect all paths for batch presigned URL fetch
-
-    for (const insp of inspections) {
-      const inspImages = insp.images || [];
-      // Log first image path structure for debugging
-      if (inspImages.length > 0) {
-        console.log(`[inspections] Sample image object:`, JSON.stringify(inspImages[0]).slice(0, 500));
-      }
-      for (const img of inspImages) {
-        // Parse taskId from path like: shop/6212/repair-orders/.../tasks/1285646232/filename.jpg
-        const match = img.path?.match(/tasks\/(\d+)\//);
-        if (match) {
-          const taskId = match[1];
-          if (!taskImagesMap[taskId]) {
-            taskImagesMap[taskId] = [];
-          }
-          const imageData = {
-            path: img.path,
-            thumbnailPath: 'thumbnails/' + img.path,
-            url: '', // Will be filled with presigned URL
-            thumbnailUrl: '', // Will be filled with presigned thumbnail URL
-            contentType: img.contentType || 'image/jpeg'
-          };
-          taskImagesMap[taskId].push(imageData);
-          allImagePaths.push({ imageData, path: img.path, thumbnailPath: 'thumbnails/' + img.path });
-        }
-      }
-    }
-
-    // Build proxy URLs for images
-    // Instead of fetching presigned URLs (which doesn't work), we return proxy URLs
-    // that point back to our /proxy-image endpoint which fetches from TM's S3
-    if (allImagePaths.length > 0) {
-      console.log(`[inspections] Building proxy URLs for ${allImagePaths.length} images...`);
-
-      // Build proxy URL for each image path
-      const buildProxyUrl = (path) => {
-        // URL to our proxy endpoint - browser will call this to get the image
-        return `http://localhost:3002/api/proxy-image?shopId=${shopId}&path=${encodeURIComponent(path)}`;
-      };
-
-      // Assign proxy URLs to all images
-      for (const { imageData, thumbnailPath, path } of allImagePaths) {
-        // Use thumbnail path for faster loading (smaller images)
-        imageData.thumbnailUrl = buildProxyUrl(thumbnailPath);
-        imageData.url = buildProxyUrl(path);
-      }
-
-      console.log(`[inspections] Proxy URLs built`);
-    }
-
     // Extract tasks from all inspections
     // TekMetric returns tasks in two different structures:
     // 1. inspection.tasks - flat array of tasks
@@ -550,7 +480,6 @@ router.get('/get-inspections', async (req, res) => {
       // Handle flat tasks array (Structure 1)
       const directTasks = insp.tasks || [];
       for (const task of directTasks) {
-        const taskImages = taskImagesMap[String(task.id)] || [];
         tasks.push({
           id: task.id,
           name: task.name,
@@ -561,7 +490,7 @@ router.get('/get-inspections', async (req, res) => {
           group: task.inspectionGroup || '',
           groupSortOrder: task.groupSortOrder || 0,
           inspectionTaskId: task.inspectionTaskId,
-          externalImages: taskImages
+          externalImages: task.externalImages || []
         });
       }
 
@@ -570,7 +499,6 @@ router.get('/get-inspections', async (req, res) => {
       for (const section of nestedSections) {
         const sectionTasks = section.tasks || [];
         for (const task of sectionTasks) {
-          const taskImages = taskImagesMap[String(task.id)] || [];
           tasks.push({
             id: task.id,
             name: task.name,
@@ -581,7 +509,7 @@ router.get('/get-inspections', async (req, res) => {
             group: task.inspectionGroup || section.title || '',
             groupSortOrder: task.groupSortOrder || 0,
             inspectionTaskId: task.inspectionTaskId,
-            externalImages: taskImages
+            externalImages: task.externalImages || []
           });
         }
       }
@@ -893,84 +821,26 @@ router.post('/complete-inspection', async (req, res) => {
       return res.status(401).json({ error: 'NO_TOKEN', details: 'No JWT token available for this shop' });
     }
 
-    // First, fetch the current inspection to get required fields
-    const getResult = await proxyToTM(
+    // Update inspection status to complete
+    // According to TM API, PUT to inspection endpoint with status: 'COMPLETE'
+    const updateResult = await proxyToTM(
       `/api/shop/${shopId}/repair-orders/${roId}/inspections/${inspectionId}`,
-      'GET',
-      null,
+      'PUT',
+      {
+        id: parseInt(inspectionId),
+        status: 'COMPLETE'
+      },
       jwtToken
     );
-
-    if (getResult.status !== 200) {
-      console.error(`[inspection] Failed to fetch inspection: ${getResult.status} - ${getResult.body}`);
-      return res.status(getResult.status).json({
-        error: 'FETCH_FAILED',
-        details: `Failed to fetch inspection before completing`
-      });
-    }
-
-    const inspection = JSON.parse(getResult.body);
-    console.log(`[inspection] Fetched inspection ${inspection.id}, name: ${inspection.name}`);
-
-    // Update inspection with completedDate
-    // TM API may reject nested objects - send only required fields
-    const updatePayload = {
-      id: inspection.id,
-      name: inspection.name,
-      repairOrderId: inspection.repairOrderId,
-      inspectionId: inspection.inspectionId,
-      technician: inspection.technician,
-      completedDate: new Date().toISOString(),
-      notifyServiceWriter: inspection.notifyServiceWriter,
-      internalInspection: inspection.internalInspection || false
-    };
-
-    console.log(`[inspection] Sending update payload:`, JSON.stringify(updatePayload, null, 2));
-
-    // Try different approaches to mark inspection complete
-    // Approach 1: POST to /complete endpoint
-    let updateResult = await proxyToTM(
-      `/api/shop/${shopId}/repair-orders/${roId}/inspections/${inspectionId}/complete`,
-      'POST',
-      {},
-      jwtToken
-    );
-    console.log(`[inspection] POST /complete result: ${updateResult.status}`);
-
-    // Approach 2: If POST to /complete fails, try PUT with completedDate
-    if (updateResult.status !== 200 && updateResult.status !== 204) {
-      console.log(`[inspection] POST /complete failed, trying PUT with completedDate`);
-      updateResult = await proxyToTM(
-        `/api/shop/${shopId}/repair-orders/${roId}/inspections/${inspectionId}`,
-        'PUT',
-        updatePayload,
-        jwtToken
-      );
-    }
 
     if (updateResult.status === 200 || updateResult.status === 204) {
       console.log(`[inspection] Inspection ${inspectionId} marked as complete`);
       return res.json({ success: true, message: 'Inspection completed' });
     } else {
       console.error(`[inspection] Failed to complete: ${updateResult.status} - ${updateResult.body}`);
-
-      // Parse TM error message if available
-      let tmError = '';
-      try {
-        const errorBody = JSON.parse(updateResult.body);
-        tmError = errorBody.message || '';
-      } catch (e) {}
-
-      // If 500 error, it may be because tasks need ratings first
-      const hint = updateResult.status === 500
-        ? 'TekMetric may require all inspection items to have ratings before completing. Please ensure all items are rated.'
-        : '';
-
       return res.status(updateResult.status).json({
         error: 'COMPLETE_FAILED',
         details: `TM API returned ${updateResult.status}`,
-        tmError,
-        hint,
         body: updateResult.body
       });
     }
@@ -981,124 +851,6 @@ router.post('/complete-inspection', async (req, res) => {
       error: 'INTERNAL_ERROR',
       details: error.message
     });
-  }
-});
-
-/**
- * GET /proxy-image
- *
- * Proxies TekMetric images through our server.
- * TM's S3 bucket is private, so we try multiple approaches:
- * 1. Fetch directly from S3 with TM JWT (may work for some images)
- * 2. Use TM's media endpoint if available
- *
- * Query params:
- * - shopId: TekMetric shop ID (required)
- * - path: S3 path of the image (required) - e.g., "shop/6212/repair-orders/.../filename.jpg"
- *
- * Returns: The image binary with proper content-type
- */
-router.get('/proxy-image', async (req, res) => {
-  const { shopId, path: imagePath } = req.query;
-
-  if (!shopId || !imagePath) {
-    return res.status(400).json({ error: 'Missing required params: shopId, path' });
-  }
-
-  try {
-    const jwtToken = await getJWTToken(shopId);
-    if (!jwtToken) {
-      return res.status(401).json({ error: 'NO_TOKEN' });
-    }
-
-    // TM API endpoint for getting presigned S3 URLs
-    // Format: GET /media/getS3URL?path={imagePath}
-    // Returns: { url: "presigned S3 URL" }
-    console.log(`[proxy-image] Trying TM GET /media/getS3URL for: ${imagePath.slice(-50)}`);
-    const result = await proxyToTM(
-      `/media/getS3URL?path=${encodeURIComponent(imagePath)}`,
-      'GET',
-      null,
-      jwtToken
-    );
-    console.log(`[proxy-image] TM getS3URL response: status=${result.status}, body=${result.body?.slice(0, 200)}`);
-
-    if (result.status === 200) {
-      // Check if result contains a URL or binary data
-      try {
-        const data = JSON.parse(result.body);
-        if (data.url) {
-          // TM returned a presigned URL - fetch image and serve directly
-          // (redirect causes ORB blocking in Chrome)
-          console.log(`[proxy-image] Fetching image from presigned URL...`);
-          const imageResponse = await fetch(data.url);
-          if (!imageResponse.ok) {
-            console.log(`[proxy-image] S3 fetch failed: ${imageResponse.status}`);
-            return res.status(502).json({ error: 'Failed to fetch from S3' });
-          }
-          const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
-          const contentType = imageResponse.headers.get('content-type') || 'image/jpeg';
-          res.set('Content-Type', contentType);
-          res.set('Cache-Control', 'public, max-age=86400');
-          res.set('Access-Control-Allow-Origin', '*');
-          return res.send(imageBuffer);
-        }
-        if (data.data) {
-          // TM returned base64 data
-          const buffer = Buffer.from(data.data, 'base64');
-          const ext = imagePath.split('.').pop()?.toLowerCase();
-          const contentType = ext === 'png' ? 'image/png' :
-                             ext === 'gif' ? 'image/gif' :
-                             ext === 'webp' ? 'image/webp' : 'image/jpeg';
-          res.set('Content-Type', contentType);
-          res.set('Cache-Control', 'public, max-age=86400');
-          return res.send(buffer);
-        }
-      } catch (e) {
-        // Not JSON, might be binary
-        const ext = imagePath.split('.').pop()?.toLowerCase();
-        const contentType = ext === 'png' ? 'image/png' :
-                           ext === 'gif' ? 'image/gif' :
-                           ext === 'webp' ? 'image/webp' : 'image/jpeg';
-        res.set('Content-Type', contentType);
-        res.set('Cache-Control', 'public, max-age=86400');
-        return res.send(Buffer.from(result.body, 'binary'));
-      }
-    }
-
-    // Try direct S3 URL as fallback (might be publicly readable)
-    const s3Url = `https://tekmetric-media.s3.amazonaws.com/${imagePath}`;
-    console.log(`[proxy-image] Trying direct S3: ${s3Url.slice(-60)}`);
-
-    const s3Response = await new Promise((resolve, reject) => {
-      https.get(s3Url, (response) => {
-        if (response.statusCode === 200 || response.statusCode === 301 || response.statusCode === 302) {
-          const chunks = [];
-          response.on('data', chunk => chunks.push(chunk));
-          response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks), headers: response.headers }));
-        } else {
-          resolve({ status: response.statusCode, body: null });
-        }
-      }).on('error', reject);
-    });
-
-    if (s3Response.status === 200 && s3Response.body) {
-      const ext = imagePath.split('.').pop()?.toLowerCase();
-      const contentType = ext === 'png' ? 'image/png' :
-                         ext === 'gif' ? 'image/gif' :
-                         ext === 'webp' ? 'image/webp' : 'image/jpeg';
-      res.set('Content-Type', contentType);
-      res.set('Cache-Control', 'public, max-age=86400');
-      return res.send(s3Response.body);
-    }
-
-    // Both methods failed
-    console.error(`[proxy-image] All fetch methods failed for: ${imagePath.slice(-50)}`);
-    return res.status(404).json({ error: 'IMAGE_NOT_FOUND', path: imagePath });
-
-  } catch (error) {
-    console.error(`[proxy-image] Error:`, error.message);
-    return res.status(500).json({ error: error.message });
   }
 });
 
