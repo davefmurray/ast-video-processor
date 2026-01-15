@@ -140,7 +140,7 @@ async function mergeVideos(issueVideoPath, explainerVideoPath, outputPath) {
 
 /**
  * Parse multipart form data using busboy
- * Extracts fields and video file
+ * Extracts fields and file (supports both videoFile and pdfFile field names)
  */
 function parseMultipart(req) {
   return new Promise((resolve, reject) => {
@@ -152,12 +152,14 @@ function parseMultipart(req) {
     busboy.on('field', (name, value) => { fields[name] = value; });
 
     busboy.on('file', (name, file, info) => {
-      if (name === 'videoFile') {
-        const videoPath = path.join(os.tmpdir(), `upload-${Date.now()}-${info.filename || 'video.mp4'}`);
-        const writeStream = fs.createWriteStream(videoPath);
+      // Accept both 'videoFile' and 'pdfFile' field names
+      if (name === 'videoFile' || name === 'pdfFile') {
+        const defaultExt = name === 'pdfFile' ? 'pdf' : 'mp4';
+        const filePath = path.join(os.tmpdir(), `upload-${Date.now()}-${info.filename || `file.${defaultExt}`}`);
+        const writeStream = fs.createWriteStream(filePath);
         file.pipe(writeStream);
         writeStream.on('finish', () => {
-          videoFile = { path: videoPath, filename: info.filename, mimeType: info.mimeType };
+          videoFile = { path: filePath, filename: info.filename, mimeType: info.mimeType };
         });
       } else {
         file.resume();
@@ -859,6 +861,208 @@ router.post('/complete-inspection', async (req, res) => {
 
   } catch (error) {
     console.error(`[inspection] Error completing inspection:`, error.message);
+    return res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * POST /upload-pdf
+ *
+ * Upload a PDF file to Tekmetric inspection task.
+ * Similar to merge-and-upload but for PDF documents.
+ *
+ * Accepts multipart form with:
+ * - pdfFile: The PDF file to upload (required)
+ * - shopId: TekMetric shop ID (required)
+ * - roId: Repair order ID (required)
+ * - inspectionId: Inspection ID (required)
+ * - taskId: Task ID (required)
+ * - description: Finding description to update on task (optional)
+ *
+ * Flow:
+ * 1. Parse multipart form data
+ * 2. Get JWT token from Auth Hub
+ * 3. Get presigned upload URL from TekMetric
+ * 4. Upload PDF to S3
+ * 5. Update task with description if provided
+ * 6. Return success/error
+ */
+router.post('/upload-pdf', async (req, res) => {
+  console.log('[pdf] Processing PDF upload request...');
+
+  let needsCleanup = [];
+
+  try {
+    // Parse multipart form data
+    const { fields, videoFile: pdfFile } = await parseMultipart(req);
+    const { shopId, roId, inspectionId, taskId, description } = fields;
+
+    // Note: parseMultipart looks for 'videoFile' field name, but we're using 'pdfFile'
+    // Let's handle both by checking the actual file in the request
+    if (!pdfFile) {
+      // Try parsing again with different approach for pdfFile
+      return res.status(400).json({ error: 'No PDF file uploaded', details: 'pdfFile field is required' });
+    }
+
+    needsCleanup.push(pdfFile.path);
+
+    if (!shopId || !roId || !inspectionId || !taskId) {
+      cleanup(needsCleanup);
+      return res.status(400).json({ error: 'Missing required fields: shopId, roId, inspectionId, taskId' });
+    }
+
+    const fileSize = fs.statSync(pdfFile.path).size;
+    console.log(`   Shop: ${shopId}, RO: ${roId}, Inspection: ${inspectionId}, Task: ${taskId}`);
+    console.log(`   PDF: ${pdfFile.filename} (${(fileSize / 1024 / 1024).toFixed(2)} MB)`);
+
+    // Get JWT token from AUTH-HUB
+    const jwtToken = await getJWTToken(shopId);
+    if (!jwtToken) {
+      cleanup(needsCleanup);
+      return res.status(401).json({ error: 'NO_TOKEN', details: 'No JWT token available for this shop' });
+    }
+
+    // Get presigned upload URL from TekMetric
+    console.log('[pdf] Getting presigned upload URL...');
+    const presignedResult = await proxyToTM(
+      `/media/create-video-upload-url`,
+      'POST',
+      {
+        files: [{ name: pdfFile.filename || `report-${Date.now()}.pdf`, mimetype: 'application/pdf' }],
+        shopId: parseInt(shopId),
+        repairOrderId: parseInt(roId),
+        roInspectionId: parseInt(inspectionId),
+        roInspectionTaskId: parseInt(taskId)
+      },
+      jwtToken
+    );
+
+    console.log(`   TM API status: ${presignedResult.status}`);
+
+    if (presignedResult.status !== 200) {
+      cleanup(needsCleanup);
+      return res.status(presignedResult.status).json({
+        error: 'UPLOAD_FAILED',
+        details: `Failed to get presigned URL (${presignedResult.status}): ${presignedResult.body}`
+      });
+    }
+
+    const presignedData = JSON.parse(presignedResult.body);
+    const fileData = presignedData.data?.[0];
+    if (!fileData || !fileData.s3) {
+      cleanup(needsCleanup);
+      return res.status(500).json({
+        error: 'UPLOAD_FAILED',
+        details: `Invalid response structure: ${JSON.stringify(presignedData).substring(0, 300)}`
+      });
+    }
+
+    const s3Url = fileData.s3.url;
+    const s3Fields = fileData.s3.fields;
+    const s3Key = fileData.path;
+
+    console.log(`   S3 bucket: ${s3Url}`);
+    console.log(`   S3 key: ${s3Key}`);
+
+    // Upload to S3 via multipart form POST
+    await uploadToS3Form(s3Url, s3Fields, s3Key, pdfFile.path, 'application/pdf');
+
+    // Update task description if provided
+    if (description && description.trim()) {
+      console.log('[pdf] Updating task description...');
+      const taskUpdateResult = await proxyToTM(
+        `/api/shop/${shopId}/repair-orders/${roId}/inspections/${inspectionId}/tasks/${taskId}`,
+        'PUT',
+        {
+          id: parseInt(taskId),
+          finding: description
+        },
+        jwtToken
+      );
+
+      if (taskUpdateResult.status !== 200) {
+        console.warn(`[pdf] Task description update returned ${taskUpdateResult.status}, but PDF was uploaded successfully`);
+      } else {
+        console.log('[pdf] Task description updated');
+      }
+    }
+
+    // Cleanup temp files
+    cleanup(needsCleanup);
+
+    console.log('[pdf] Upload complete!');
+    return res.json({
+      success: true,
+      message: 'PDF uploaded successfully',
+      pdfUrl: s3Key
+    });
+
+  } catch (error) {
+    console.error('[pdf] Error:', error.message);
+    cleanup(needsCleanup);
+    return res.status(500).json({
+      error: 'UPLOAD_FAILED',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * POST /update-task-description
+ *
+ * Update only the description/finding of an inspection task.
+ *
+ * Body params:
+ * - shopId: TekMetric shop ID (required)
+ * - roId: Repair order ID (required)
+ * - inspectionId: Inspection ID (required)
+ * - taskId: Task ID (required)
+ * - description: Finding description (required)
+ */
+router.post('/update-task-description', async (req, res) => {
+  const { shopId, roId, inspectionId, taskId, description } = req.body;
+
+  console.log(`[task] Updating description for task ${taskId}`);
+
+  if (!shopId || !roId || !inspectionId || !taskId || !description) {
+    return res.status(400).json({ error: 'Missing required fields: shopId, roId, inspectionId, taskId, description' });
+  }
+
+  try {
+    // Get JWT token from AUTH-HUB
+    const jwtToken = await getJWTToken(shopId);
+    if (!jwtToken) {
+      return res.status(401).json({ error: 'NO_TOKEN', details: 'No JWT token available for this shop' });
+    }
+
+    // Update task description
+    const updateResult = await proxyToTM(
+      `/api/shop/${shopId}/repair-orders/${roId}/inspections/${inspectionId}/tasks/${taskId}`,
+      'PUT',
+      {
+        id: parseInt(taskId),
+        finding: description
+      },
+      jwtToken
+    );
+
+    if (updateResult.status === 200 || updateResult.status === 204) {
+      console.log(`[task] Task ${taskId} description updated`);
+      return res.json({ success: true, message: 'Description updated' });
+    } else {
+      console.error(`[task] Failed to update: ${updateResult.status} - ${updateResult.body}`);
+      return res.status(updateResult.status).json({
+        error: 'UPDATE_FAILED',
+        details: `TM API returned ${updateResult.status}`,
+        body: updateResult.body
+      });
+    }
+
+  } catch (error) {
+    console.error(`[task] Error updating description:`, error.message);
     return res.status(500).json({
       error: 'INTERNAL_ERROR',
       details: error.message
